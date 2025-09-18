@@ -14,7 +14,10 @@ Key features:
 Requirements:
 
 -Python 3.6+
+
 -Tkinter (usually included with Python)
+
 -Scapy library
+
 -Netifaces library
 -
