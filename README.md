@@ -4,10 +4,15 @@ PyNetScanner is a graphical network scanning tool built with Python and Tkinter.
 Key features:
 
 -Local network discovery via ping sweeps
+
 -Passive ARP monitoring to detect devices
+
 -Basic port scanning for common services
+
 -Multi-threaded scanning for improved performance
+
 -Clean GUI with real-time results display
+
 -Cross-platform compatibility (Windows, Linux, macOS)
 -
 
