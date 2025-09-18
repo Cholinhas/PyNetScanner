@@ -1,0 +1,261 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import socket
+import platform
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+import netifaces
+from datetime import datetime
+import scapy.all as scapy
+from scapy.layers.l2 import ARP, Ether
+import threading
+
+class NetworkScannerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PyNetScanner - Escáner de Red")
+        self.root.geometry("800x600")
+        
+        # Variables
+        self.scanning = False
+        self.local_ip = self.get_local_ip()
+        self.network_prefix = ".".join(self.local_ip.split(".")[:3]) + "."
+        
+        # Interfaz
+        self.create_widgets()
+        
+    def get_local_ip(self):
+        """Obtiene la IP local sin requerir permisos especiales"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+    
+    def create_widgets(self):
+        # Frame superior
+        top_frame = ttk.Frame(self.root, padding="10")
+        top_frame.pack(fill=tk.X)
+        
+        # Información de red
+        ttk.Label(top_frame, text=f"Tu IP: {self.local_ip}").pack(anchor=tk.W)
+        ttk.Label(top_frame, text=f"Red: {self.network_prefix}0/24").pack(anchor=tk.W)
+        
+        # Botones
+        btn_frame = ttk.Frame(self.root, padding="10")
+        btn_frame.pack(fill=tk.X)
+        
+        self.scan_btn = ttk.Button(
+            btn_frame, 
+            text="Iniciar Escaneo", 
+            command=self.start_scan_thread
+        )
+        self.scan_btn.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            btn_frame, 
+            text="Limpiar", 
+            command=self.clear_results
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Panel de resultados
+        self.result_area = scrolledtext.ScrolledText(
+            self.root, 
+            wrap=tk.WORD, 
+            font=('Consolas', 10)
+        )
+        self.result_area.pack(expand=True, fill=tk.BOTH, padx=10, pady=(0, 10))
+        
+        # Barra de estado
+        self.status_var = tk.StringVar()
+        self.status_var.set("Listo")
+        ttk.Label(
+            self.root, 
+            textvariable=self.status_var,
+            relief=tk.SUNKEN,
+            anchor=tk.W
+        ).pack(fill=tk.X, side=tk.BOTTOM)
+    
+    def start_scan_thread(self):
+        """Inicia el escaneo en un hilo separado para no bloquear la GUI"""
+        if not self.scanning:
+            self.scanning = True
+            self.scan_btn.config(text="Detener Escaneo")
+            self.status_var.set("Escaneando...")
+            
+            # Limpiar resultados anteriores
+            self.result_area.delete(1.0, tk.END)
+            
+            # Iniciar hilo
+            scan_thread = threading.Thread(target=self.run_scan, daemon=True)
+            scan_thread.start()
+        else:
+            self.scanning = False
+            self.scan_btn.config(text="Iniciar Escaneo")
+            self.status_var.set("Escaneo detenido")
+    
+    def clear_results(self):
+        self.result_area.delete(1.0, tk.END)
+    
+    def log(self, message):
+        """Añade un mensaje al área de resultados"""
+        self.result_area.insert(tk.END, message + "\n")
+        self.result_area.see(tk.END)
+        self.root.update_idletasks()
+    
+    def ping_sweep(self):
+        """Escaneo de hosts activos usando ping"""
+        active_hosts = []
+        
+        def ping(ip):
+            try:
+                param = "-n 1" if platform.system().lower() == "windows" else "-c 1"
+                command = ["ping", param, "-W", "1", ip]
+                response = subprocess.call(
+                    command, 
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                if response == 0:
+                    active_hosts.append(ip)
+                    self.log(f"[+] Host activo: {ip}")
+            except Exception:
+                pass
+        
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            for i in range(1, 255):
+                if not self.scanning:
+                    break
+                ip = f"{self.network_prefix}{i}"
+                executor.submit(ping, ip)
+        
+        return active_hosts
+    
+    def arp_scan(self, timeout=5):
+        """Escaneo ARP pasivo por tiempo limitado"""
+        devices = []
+        start_time = datetime.now()
+        
+        def arp_monitor_callback(pkt):
+            if not self.scanning:
+                return
+            if ARP in pkt and pkt[ARP].op == 2:  # ARP response
+                device = {
+                    "ip": pkt[ARP].psrc,
+                    "mac": pkt[ARP].hwsrc
+                }
+                if device not in devices:
+                    devices.append(device)
+                    self.log(f"[+] Dispositivo ARP: {pkt[ARP].psrc} ({pkt[ARP].hwsrc})")
+        
+        try:
+            interface = netifaces.interfaces()[0]
+            self.log(f"\nEscuchando tráfico ARP en {interface} por {timeout} segundos...")
+            
+            # Usar scapy en un hilo separado
+            def sniff_arp():
+                scapy.sniff(
+                    prn=arp_monitor_callback, 
+                    filter="arp", 
+                    store=0, 
+                    timeout=timeout
+                )
+            
+            arp_thread = threading.Thread(target=sniff_arp, daemon=True)
+            arp_thread.start()
+            arp_thread.join(timeout + 2)
+            
+        except Exception as e:
+            self.log(f"Error en ARP scan: {e}")
+        
+        return devices
+    
+    def get_network_info(self):
+        """Obtiene información general de la red"""
+        try:
+            gateway = netifaces.gateways()['default'][netifaces.AF_INET][0]
+            dns_servers = []
+            try:
+                with open('/etc/resolv.conf') as f:
+                    dns_servers = [line.split()[1] for line in f if line.startswith('nameserver')]
+            except:
+                pass
+            
+            return {
+                "gateway": gateway,
+                "dns_servers": dns_servers,
+                "interfaces": netifaces.interfaces()
+            }
+        except Exception as e:
+            self.log(f"Error obteniendo info de red: {e}")
+            return {}
+    
+    def run_scan(self):
+        """Ejecuta todos los escaneos"""
+        try:
+            # 1. Información básica de red
+            self.log("\n[=== INFORMACIÓN DE RED ===]")
+            net_info = self.get_network_info()
+            self.log(f"Gateway: {net_info.get('gateway', '?')}")
+            self.log(f"DNS: {', '.join(net_info.get('dns_servers', []))}")
+            self.log(f"Interfaces: {', '.join(net_info.get('interfaces', []))}")
+            
+            # 2. Escaneo Ping
+            self.log("\n[=== ESCANEO PING ===]")
+            active_hosts = self.ping_sweep()
+            self.log(f"\nTotal hosts activos: {len(active_hosts)}")
+            
+            # 3. Escaneo ARP
+            if self.scanning:
+                self.log("\n[=== ESCANEO ARP ===]")
+                arp_devices = self.arp_scan()
+                self.log(f"\nTotal dispositivos ARP: {len(arp_devices)}")
+            
+            # 4. Escaneo de puertos en gateway
+            if self.scanning and 'gateway' in net_info and net_info['gateway'] != self.local_ip:
+                self.log("\n[=== PUERTOS ABIERTOS EN GATEWAY ===]")
+                open_ports = self.port_scan(net_info['gateway'])
+                self.log(f"Puertos abiertos: {', '.join(map(str, open_ports)) if open_ports else 'Ninguno'}")
+            
+            self.log("\n[ESCANEO COMPLETADO]")
+            
+        except Exception as e:
+            self.log(f"\n[ERROR] {str(e)}")
+        finally:
+            self.scanning = False
+            self.scan_btn.config(text="Iniciar Escaneo")
+            self.status_var.set("Escaneo completado")
+    
+    def port_scan(self, ip, ports=None):
+        """Escaneo básico de puertos comunes"""
+        if ports is None:
+            ports = [21, 22, 23, 25, 53, 80, 443, 3306, 3389]
+        
+        open_ports = []
+        
+        def scan_port(port):
+            if not self.scanning:
+                return
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(1)
+                    result = s.connect_ex((ip, port))
+                    if result == 0:
+                        open_ports.append(port)
+                        service = socket.getservbyport(port, 'tcp') if port <= 1024 else "?"
+                        self.log(f"Puerto {port} ({service}) abierto")
+            except Exception:
+                pass
+        
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            executor.map(scan_port, ports)
+        
+        return open_ports
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = NetworkScannerGUI(root)
+    root.mainloop()
